@@ -41,20 +41,23 @@
 namespace bytedance::flux::ths_op {
 
 DataTypeEnum
-from_torch_dtype(at::ScalarType torch_dtype) {
+from_paddle_dtype(phi::DataType torch_dtype) {
   switch (torch_dtype) {
-    case at::ScalarType::Half: {
+    case phi::DataType::FLOAT16: {
       return _FP16{};
     }; break;
-    case at::ScalarType::BFloat16: {
+    case phi::DataType::BFLOAT16: {
       return _BF16{};
     }; break;
+#if 0
+    // umisiwng: paddle doesn't support fp8 yet.
     case at::ScalarType::Float8_e4m3fn: {
       return _E4M3{};
     }; break;
     case at::ScalarType::Float8_e5m2: {
       return _E5M2{};
     }; break;
+#endif
     default:
       throw std::runtime_error(
           std::string("unsupported torch_dtype:") + at::toString(torch_dtype));
@@ -63,9 +66,12 @@ from_torch_dtype(at::ScalarType torch_dtype) {
 }
 
 bool
-is_fp8_torch_dtype(at::ScalarType torch_dtype) {
+is_fp8_paddle_dtype(at::ScalarType torch_dtype) {
+  return false;
+#if 0
   return (torch_dtype == at::ScalarType::Float8_e4m3fn) ||
          (torch_dtype == at::ScalarType::Float8_e5m2);
+#endif
 }
 
 size_t

@@ -46,7 +46,7 @@
 #define FLUX_UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-namespace bytedance {
+namespace paddle {
 namespace flux {
 
 constexpr int kMaxLocalWorldSize = 8;
