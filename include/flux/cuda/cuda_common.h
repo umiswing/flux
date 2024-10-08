@@ -202,7 +202,7 @@ struct GpuTimer {
 };
 
 // exit if error
-void ensure_nvml_init();
+bool ensure_nvml_init();
 
 // exit if error
 const char *get_gpu_device_name(int devid);

@@ -19,15 +19,15 @@
 
 #define CHECK_TYPE(x, st)                  \
   PADDLE_ENFORCE(                          \
-      x.scalar_type() == st,               \
+      x.dtype() == st,               \
       "Inconsistency of Tensor type: " #x, \
       " expect ",                          \
       st,                                  \
       " got ",                             \
-      x.scalar_type())
-#define CHECK_CPU(x) PADDLE_ENFORCE(x.is_cpu(), #x, " must be a cpu tensor")
-#define CHECK_CUDA(x) PADDLE_ENFORCE(x.is_cuda(), #x, " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) PADDLE_ENFORCE(x.is_contiguous(), #x, " must be contiguous")
+      x.dtype())
+#define CHECK_CPU(x) PADDLE_ENFORCE(x.place().GetType() == AllocationType::CPU, #x, " must be a cpu tensor")
+#define CHECK_CUDA(x) PADDLE_ENFORCE(x.place().GetType() == AllocationType::GPU, #x, " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) PADDLE_ENFORCE(x.meta().is_contiguous(), #x, " must be contiguous")
 #define CHECK_INPUT(x, st) \
   CHECK_CUDA(x);           \
   CHECK_CONTIGUOUS(x);     \
@@ -35,9 +35,9 @@
 #define CHECK_INPUT_LOOSE(x) \
   CHECK_CUDA(x);             \
   CHECK_CONTIGUOUS(x)
-#define CHECK_NDIM(x, ndim) PADDLE_ENFORCE(x.dim() == ndim, #x, ".dim()", " != ", ndim)
+#define CHECK_NDIM(x, ndim) PADDLE_ENFORCE(x.dims().size() == ndim, #x, ".dims().size()", " != ", ndim)
 #define CHECK_DIM(x, dim, sz) \
-  PADDLE_ENFORCE(x.size(dim) == sz, #x, ".size(", dim, "):", x.size(dim), " != ", sz)
+  PADDLE_ENFORCE(x.dims(dim) == sz, #x, ".dims(", dim, "):", x.dims(dim), " != ", sz)
 #define CHECK_1D(x, dim0) \
   CHECK_NDIM(x, 1);       \
   CHECK_DIM(x, 0, dim0)

@@ -35,11 +35,11 @@ namespace bytedance::flux::ths_op {
 using torch::Tensor;
 
 void
-bsr_reduce(torch::Tensor input, torch::Tensor output, int block_h, int block_w) {
+bsr_reduce(DenseTensor input, DenseTensor output, int block_h, int block_w) {
   TORCH_CHECK(input.dim() == 3, "input shape is not 3 (B, M, N)");
   bsr2dense_reduce(
-      input.data_ptr(),
-      output.data_ptr(),
+      input.data(),
+      output.data(),
       std::vector<int>(
           {static_cast<int>(input.size(0)),
            static_cast<int>(input.size(1)),

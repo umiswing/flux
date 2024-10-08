@@ -15,10 +15,6 @@
 //
 //===----------------------------------------------------------------------===//
 #include <vector>
-#include <ATen/ops/from_blob.h>
-#include <c10/core/ScalarType.h>
-#include <c10/cuda/CUDAFunctions.h>
-#include <torch/cuda.h>
 #include "flux/cuda/cuda_common.h"
 #include "flux/cuda/helper_kernels.h"
 #include "flux/flux.h"
@@ -96,6 +92,7 @@ nvshmem_create_tensor_list(const std::vector<int64_t> &shape, c10::ScalarType dt
 
 #endif
 
+#if 0
 std::vector<torch::Tensor>
 cudaipc_create_tensor_list(
     c10::intrusive_ptr<c10d::ProcessGroup> pg,
@@ -191,28 +188,37 @@ flux_create_tensor_list(
   return cudaipc_create_tensor_list(pg, shape, dtype);
 #endif
 }
+#endif
 
 void
 flux_barrier_all_on_stream(
     cudaStream_t stream,
-    c10::optional<std::vector<torch::Tensor>> sync_buffers,
-    c10::optional<int> rank) {
+    paddle::optional<std::vector<DenseTensor*>> sync_buffers,
+    paddle::optional<int> rank) {
 #ifdef FLUX_SHM_USE_NVSHMEM
   nvshmemx_barrier_all_on_stream(stream);
 #else
+#if 0
   FLUX_CHECK(sync_buffers.has_value());
   FLUX_CHECK(rank.has_value());
+#endif
   std::vector<int32_t *> sync_buffer_ptrs;
+#if 0
   auto sync_buffers_val = sync_buffers.value();
   FLUX_CHECK(sync_buffers_val[rank.value()].defined());
+#endif
+  std::vector<DenseTensor*> sync_buffers_val = sync_buffers.get();
+  FLUX_CHECK(sync_buffers_val[rank.get()]->initialized());
+
   int world_size = sync_buffers_val.size();
-  for (int i = 0; i < sync_buffers_val.size(); i++) {
-    sync_buffer_ptrs.push_back(reinterpret_cast<int32_t *>(sync_buffers_val[i].data_ptr()));
+  for (size_t i = 0; i < sync_buffers_val.size(); i++) {
+    sync_buffer_ptrs.push_back(reinterpret_cast<int32_t *>(sync_buffers_val[i]->data()));
   }
-  cudaipc_barrier_all_on_stream_impl(stream, sync_buffer_ptrs.data(), rank.value(), world_size);
+  cudaipc_barrier_all_on_stream_impl(stream, sync_buffer_ptrs.data(), rank.get(), world_size);
 #endif
 }
 
+#if 0
 void
 pyflux_barrier_all_on_stream(
     intptr_t stream,
@@ -220,6 +226,7 @@ pyflux_barrier_all_on_stream(
     c10::optional<int> rank) {
   flux_barrier_all_on_stream((cudaStream_t)stream, sync_buffers, rank);
 }
+#endif
 
 }  // namespace flux
 }  // namespace bytedance

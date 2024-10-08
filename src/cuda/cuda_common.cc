@@ -20,12 +20,13 @@
 
 namespace bytedance::flux {
 
-void
+bool
 ensure_nvml_init() {
   static bool inited = []() -> bool {
     NVML_CHECK(nvml_stub().nvmlInit());  // can be initialized many times.
     return true;
   }();
+  return inited;
 }
 
 // why not std::string? flux/th_op is compiled with -D_GLIBCXX_USE_CXX11_ABI=0 but flux/cuda is not

@@ -16,33 +16,24 @@
 //===----------------------------------------------------------------------===//
 
 #include "flux/ths_op/ths_op.h"
-#include "c10/cuda/CUDAFunctions.h"
 #include "flux/flux.h"
 #include "flux/cuda/cuda_common.h"
 #include "flux/gemm_hparams.h"
 #include "flux/gemm_meta.h"
 #include "flux/op_registry.h"
-#include <ATen/core/List.h>
-#include <ATen/ops/empty.h>
-#include <c10/core/ScalarType.h>
-#include <c10/core/TensorOptions.h>
-#include <c10/util/intrusive_ptr.h>
 #include <cuda_runtime_api.h>
-#include <ATen/core/jit_type.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
-#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include "flux/runtime_config.h"
 
 namespace bytedance::flux::ths_op {
 
 DataTypeEnum
-from_paddle_dtype(phi::DataType torch_dtype) {
-  switch (torch_dtype) {
+from_paddle_dtype(phi::DataType paddle_dtype) {
+  switch (paddle_dtype) {
     case phi::DataType::FLOAT16: {
       return _FP16{};
     }; break;
@@ -50,7 +41,7 @@ from_paddle_dtype(phi::DataType torch_dtype) {
       return _BF16{};
     }; break;
 #if 0
-    // umisiwng: paddle doesn't support fp8 yet.
+    // umiswing: paddle doesn't support fp8 yet.
     case at::ScalarType::Float8_e4m3fn: {
       return _E4M3{};
     }; break;
@@ -60,13 +51,13 @@ from_paddle_dtype(phi::DataType torch_dtype) {
 #endif
     default:
       throw std::runtime_error(
-          std::string("unsupported torch_dtype:") + at::toString(torch_dtype));
+          std::string("unsupported torch_dtype:") + phi::DataTypeToString(paddle_dtype));
   }
   return DataTypeEnum{};
 }
 
 bool
-is_fp8_paddle_dtype(at::ScalarType torch_dtype) {
+is_fp8_paddle_dtype(phi::DataType paddle_dtype) {
   return false;
 #if 0
   return (torch_dtype == at::ScalarType::Float8_e4m3fn) ||
@@ -75,18 +66,11 @@ is_fp8_paddle_dtype(at::ScalarType torch_dtype) {
 }
 
 size_t
-torch_dtype_size(at::ScalarType torch_dtype) {
-  switch (torch_dtype) {
-    case at::ScalarType::Half:
-    case at::ScalarType::BFloat16: return 2;
-    case at::ScalarType::Float8_e4m3fn:
-    case at::ScalarType::Float8_e5m2: return 1;
-    default:
-      throw std::runtime_error(
-          std::string("unsupported torch_dtype:") + at::toString(torch_dtype));
-  }
-  return 0;
+paddle_dtype_size(phi::DataType paddle_dtype) {
+  return phi::SizeOf(paddle_dtype);
 }
+
+#if 0
 void CUDART_CB
 closeIpcMemHandleCallback(cudaStream_t stream, cudaError_t status, void *devPtr) {
   cudaIpcCloseMemHandle(devPtr);
@@ -443,5 +427,6 @@ PYBIND11_MODULE(FLUX_TORCH_EXTENSION_NAME, m) {
   // Initialize ops in registry
   ThsOpsInitRegistry::instance().initialize_all(m);
 }
+#endif
 
 }  // namespace bytedance::flux::ths_op
