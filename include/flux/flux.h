@@ -46,7 +46,7 @@
 #define FLUX_UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-namespace paddle {
+namespace bytedance {
 namespace flux {
 
 constexpr int kMaxLocalWorldSize = 8;
@@ -888,6 +888,10 @@ to_make_expr(cute::tuple<Ts...> const &tup) {
 ///////////////////////////////////////////////////////////////
 // General comparator
 ///////////////////////////////////////////////////////////////
+template <class... Ts>
+constexpr bool
+operator<(cute::tuple<Ts...> const &lhs, cute::tuple<Ts...> const &rhs);
+
 namespace detail {
 template <class Tp, class Up, std::size_t I, std::size_t Size>
 struct TupleCompare {
@@ -896,6 +900,13 @@ struct TupleCompare {
     if constexpr (I == Size) {
       return false;
     } else {
+#if 0
+      if constexpr (cute::is_tuple<decltype(cute::get<I>(t))>::value)
+          return bool(bytedance::flux::<(cute::get<I>(t), cute::get<I>(u))) ||
+            (!bool(bytedance::flux::<(cute::get<I>(t), cute::get<I>(u))) &&
+             TupleCompare<Tp, Up, I + 1, Size>::less(t,u));
+#endif
+
       return bool(cute::get<I>(t) < cute::get<I>(u)) ||
              (!bool(cute::get<I>(u) < cute::get<I>(t)) &&
               TupleCompare<Tp, Up, I + 1, Size>::less(t, u));

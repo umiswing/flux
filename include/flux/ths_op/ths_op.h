@@ -16,7 +16,6 @@
 //===----------------------------------------------------------------------===//
 
 #pragma once
-#include "c10/util/Optional.h"
 #include "flux/flux.h"
 #include "flux/utils.h"
 #include "flux/gemm_hparams.h"
@@ -24,11 +23,6 @@
 #include "flux/op_registry.h"
 #include "./util.h"
 #include "flux_shm.h"
-#include <ATen/core/ivalue.h>
-#include <pybind11/pybind11.h>
-#include <c10/core/ScalarType.h>
-#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
-#include <torch/extension.h>
 
 #define FLUX_TORCH_EXTENSION_NAME flux_ths_pybind
 
@@ -36,13 +30,18 @@ namespace bytedance {
 namespace flux {
 namespace ths_op {
 
-DataTypeEnum from_torch_dtype(at::ScalarType torch_dtype);
-bool is_fp8_torch_dtype(at::ScalarType torch_dtype);
-size_t torch_dtype_size(at::ScalarType torch_dtype);
-// used by MoE
-torch::Tensor setup_shared_memory(
-    int64_t rank, int64_t world_size, torch::Tensor local_data, std::vector<void *> *host_ptrs);
+DataTypeEnum from_paddle_dtype(phi::DataType paddle_dtype);
+bool is_fp8_paddle_dtype(phi::DataType paddle_dtype);
+size_t paddle_dtype_size(phi::DataType paddle_dtype);
 
+#if 0
+// used by MoE
+DenseTensor setup_shared_memory(
+    int64_t rank, int64_t world_size, DenseTensor local_data, std::vector<void *> *host_ptrs);
+#endif
+
+#if 0
+// umiswing: test_gemm_rs.py does not tune, it is weird but ... let us just ignore it temp.
 // Wraps c++ types in class holder, in order to communicate with python
 struct PyTuningRecord : public torch::CustomClassHolder {
   UnifiedGemmMeta meta;
@@ -101,7 +100,10 @@ class ProfilingContext : public torch::CustomClassHolder {
   // 2. update the latest_key_ptr to be (meta,rt_conf)
   UnifiedGemmHParams record_best(UnifiedGemmMeta const &meta, RuntimeConfig const &rt_conf);
 };
+#endif
 
+#if 0
+// umiswing: this class is for pybind in flux, we do not need it.
 namespace py = pybind11;
 
 // Registry of functions that register
@@ -162,12 +164,19 @@ struct MoeArguments : public torch::CustomClassHolder {
       c10::ScalarType input_dtype,
       c10::ScalarType output_dtype);
 };
+#endif
 
-bool bitwise_check(torch::Tensor A, torch::Tensor B);
-void uniform_initialize(torch::Tensor tensor, uint64_t seed, double min, double max);
+#if 0
+// umiswing: useless until ag_gemm
+bool bitwise_check(DenseTensor A, DenseTensor B);
+#endif
+
+#if 0
+void uniform_initialize(DenseTensor tensor, uint64_t seed, double min, double max);
 void cudaipc_barrier_all_on_stream(
-    cudaStream_t stream, std::vector<torch::Tensor> &sync_buffer, int rank);
-void lazy_init_buffer_tensor(torch::Tensor *tensor, int64_t buffer_size);
+    cudaStream_t stream, std::vector<DenseTensor> &sync_buffer, int rank);
+void lazy_init_buffer_tensor(DenseTensor *tensor, int64_t buffer_size);
+#endif
 }  // namespace ths_op
 }  // namespace flux
 }  // namespace bytedance

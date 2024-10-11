@@ -22,5 +22,5 @@
 #include <torch/extension.h>
 
 namespace bytedance::flux::ths_op {
-void bsr_reduce(torch::Tensor input, torch::Tensor output, int block_h, int block_w);
+void bsr_reduce(DenseTensor input, DenseTensor output, int block_h, int block_w);
 }
