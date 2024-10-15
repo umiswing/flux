@@ -493,9 +493,6 @@ class GemmRS {
       FLUX_CHECK(!weight_scale.is_initialized());
       FLUX_CHECK(!output_scale.is_initialized());
 
-      printf("\n>>>>>>>>>>>>>>>>>>>>>>>>> not fp8 gemm\n");
-
-
       const GemmReduceScatterArguments args{
           .m = rt_conf.m(),
           .n = rt_conf.n(),
@@ -518,26 +515,21 @@ class GemmRS {
 
       // initialize workspace
       int64_t workspace_size = cutlass_op->get_workspace_size(args);
-      printf("\n>>>>>>>>>>workspace_size:%d\n<<<<<<<<<<",workspace_size);
       this->lazy_init_gemm_buffer(input, workspace_size);
       void *workspace = this->gemm_buffer.initialized() ? this->gemm_buffer.data() : nullptr;
-      printf("\nafter workspace init\n");
 
       // initialize barrier workspace
       int64_t barrier_workspace_size = cutlass_op->get_barrier_workspace_size(args);
       // * 8 is for corner case reduce_scatter tiles. never mind this won't be a large memory
       barrier_workspace_size = barrier_workspace_size / sizeof(int) * sizeof(PerTileFlags) * 8;
-      printf("\n>>>>>>>>>>barrier_workspace_size:%d\n<<<<<<<<<<",barrier_workspace_size);
       // TODO(umiswing): find a way to init barrier buffer in cpp, now just recored buffer size
       // and allocate in python manually
       this->lazy_init_barrier_buffer(barrier_workspace_size);
-      printf("\nafter barrier workspace init\n");
 
       if ((fuse_reduction && !(meta.arch() == _Sm90{})) || this->no_nvlink) {
         // need to zero buffers;
         zero_buffers();
       }
-      printf("\nafter zero buffer\n");
       cutlass_op->run(args, workspace, stream);
 
     } else {
@@ -586,8 +578,6 @@ class GemmRS {
       }
       cutlass_op->run(fp8_args, workspace, stream);
     }
-    cudaDeviceSynchronize();
-    printf("\n>>>>>>>>>>>>>>forward_gemm_impl finished\n");
   }
 
   DenseTensor

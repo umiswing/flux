@@ -40,14 +40,11 @@ void GemmRSKernel(const Context& dev_ctx,
   auto map = distributed::ProcessGroupMapFromGid::getInstance();
 
   distributed::ProcessGroup* pg = map->get(ring_id);
-  // paddle::distributed::ProcessGroupNCCL* pg = static_cast<paddle::distributed::ProcessGroupNCCL*>(map->get(ring_id));
 
   PADDLE_ENFORCE_NE(pg,
                     nullptr,
                     common::errors::Unavailable(
                         "ProcessGroup is nullptr."));
-
-  printf("\npg->GetRank():%d, pg->GetSize():%d\n", pg->GetRank(), pg->GetSize());
 
   int32_t world_size = pg->GetSize();
   int32_t rank = pg->GetRank();
@@ -61,59 +58,6 @@ void GemmRSKernel(const Context& dev_ctx,
                     common::errors::Unavailable(
                         "comm_ctx is nullptr."));
 
-  // const phi::DeviceContext* comm_ctx = pg->GetGemmRSContext(input.place());
-
-#if 0
-  const auto& comm_context_manager =
-      phi::distributed::CommContextManager::GetInstance();
-
-  PADDLE_ENFORCE_EQ(comm_context_manager.Has(std::to_string(ring_id)),
-                    true,
-                    common::errors::InvalidArgument(
-                        "You choose to use new communication library by "
-                        "setting environment "
-                        "variable FLAGS_dynamic_static_unified_comm True. "
-                        "But ring_id(%d) is "
-                        "not found in comm_context_manager.",
-                        std::to_string(ring_id)));
-  phi::distributed::NCCLCommContext* comm_ctx = nullptr;
-  comm_ctx = static_cast<phi::distributed::NCCLCommContext*>(
-      comm_context_manager.Get(std::to_string(ring_id)));
-  PADDLE_ENFORCE_NE(comm_ctx,
-                    nullptr,
-                    common::errors::Unavailable(
-                        "NCCLCommContext is nullptr, collective op should "
-                        "has ring_id attr."));
-  PADDLE_ENFORCE_EQ(nranks,
-                    comm_ctx->GetSize(),
-                    common::errors::InvalidArgument(
-                        "The number of ranks (%d) you set of must "
-                        "be equal to comm_ctx->GetSize() (%d).",
-                        nranks,
-                        comm_ctx->GetSize()));
-
-  printf("\ncomm_ctx->GetRank():%d, comm_ctx->GetSize():%d\n",comm_ctx->GetRank(), comm_ctx->GetSize());
-#endif
-
-#if 0
-  // maybe add a static cache in c++ side?
-  phi::distributed::NCCLCommContext *comm_ctx = nullptr;
-  comm_ctx = static_cast<phi::distributed::NCCLCommContext *>(dev_ctx.GetCommContext());
-  PADDLE_ENFORCE_NE(comm_ctx,
-                    nullptr,
-                    common::errors::Unavailable(
-                        "NCCLCommContext is nullptr, collective op should "
-                        "has ring_id attr."));
-  assert(comm_ctx != nullptr);
-  printf("\n>>>>>>>>>>start get rank!\n");
-  int32_t rank = comm_ctx->GetRank();
-  printf("\n>>>>>>>>>>start get size!\n");
-  int32_t world_size = comm_ctx->GetSize();
-  printf("\n>>>>>>>>>>start init GemmRS!\n");
-  printf("\ncomm_ctx is %p\n", (void*)comm_ctx);
-  // printf("\n>>>>>>>>>>world_size is %d\n", world_size);
-  // printf("\n>>>>>>>>>>rank is %d\n", rank);
-#endif
   auto get_non_const_buffers = [](const std::vector<const DenseTensor*>& buffers) {
     std::vector<DenseTensor*> nonconst_buffers;
 #if 0
@@ -130,42 +74,6 @@ void GemmRSKernel(const Context& dev_ctx,
   std::vector<DenseTensor*> nonconst_sync_buffers = get_non_const_buffers(sync_buffers);
   std::vector<DenseTensor*> nonconst_barrier_buffers = get_non_const_buffers(barrier_buffers);
 
-  printf("\noutput_buffers:\n");
-  for(auto p : output_buffers) {
-    printf("%p, ",p);
-  }
-  printf("\n");
-  for(auto p : nonconst_output_buffers) {
-    printf("%p, ",p);
-  }
-
-  printf("\nreduce_buffers:\n");
-  for(auto p : reduce_buffers) {
-    printf("%p, ",p);
-  }
-  printf("\n");
-  for(auto p : nonconst_reduce_buffers) {
-    printf("%p, ",p);
-  }
-
-  printf("\nsync_buffers:\n");
-  for(auto p : sync_buffers) {
-    printf("%p, ",p);
-  }
-  printf("\n");
-  for(auto p : nonconst_sync_buffers) {
-    printf("%p, ",p);
-  }
-
-  printf("\nbarrier_buffers:\n");
-  for(auto p : barrier_buffers) {
-    printf("%p, ",p);
-  }
-  printf("\n");
-  for(auto p : nonconst_barrier_buffers) {
-    printf("%p, ",p);
-  }
-
   bytedance::flux::ths_op::flux::GemmRS<T, T> gemm_rs(dev_ctx,
                                                       comm_ctx,
                                                       nnodes,
@@ -180,10 +88,7 @@ void GemmRSKernel(const Context& dev_ctx,
                                                       nonconst_sync_buffers,
                                                       nonconst_barrier_buffers);
 
-  printf("\n>>>>>>>>>>successful init GemmRS!\n");
   *fake_output = gemm_rs.forward(input, weight, bias, input_scale, weight_scale, output_scale, true);
-  cudaDeviceSynchronize();
-  printf("\n>>>>>>>>>>gemm_rs.forward finished\n");
 }
 
 } // namespace phi
