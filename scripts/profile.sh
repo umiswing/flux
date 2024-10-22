@@ -28,9 +28,9 @@ additional_args="--rdzv_endpoint=${master_addr}:${master_port}"
 
 
 # CMD="torchrun \
-# CMD="/workspace/nsys/bin/nsys profile --force-overwrite true -o torch_flux_full torchrun \
 # CMD="gdb --args torchrun \
-CMD="gdb --args python /usr/local/bin/torchrun \
+# CMD="gdb --args python /usr/local/bin/torchrun \
+CMD="nsys profile --force-overwrite true -o torch torchrun \
   --node_rank=${node_rank} \
   --nproc_per_node=${nproc_per_node} \
   --nnodes=${nnodes} \
