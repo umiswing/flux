@@ -52,6 +52,7 @@
 #include "paddle/phi/kernels/view_kernel.h"
 #include "paddle/phi/kernels/reduce_sum_kernel.h"
 ////////////////////////////////////////////////////////////
+#include <nvtx3/nvToolsExt.h>
 namespace bytedance::flux::ths_op {
 namespace flux {
 // using torch::Tensor;
@@ -60,10 +61,9 @@ template<typename InT, typename OutT>
 class GemmRS {
  private:
   const phi::GPUContext& dev_ctx;
-  // const phi::distributed::ProcessGroup* pg;
+  phi::distributed::ProcessGroup* tp_group;
   // umiswing: weird name, but it's used in source code of process group.
   const phi::GPUContext* comm_ctx;
-  // const phi::DeviceContext* comm_ctx;
  private:
   // TODO(umiswing): i find nobody use phi::intrusive_ptr...
   // phi::intrusive_ptr<paddle::distributed::ProcessGroupNCCL> tp_group; // umiswing: not necessary to pass tp_group
@@ -88,16 +88,16 @@ class GemmRS {
 
  private:
   // Symmetrically distributed tensor
-  std::vector<DenseTensor*> output_buffers; // OutT
-  std::vector<DenseTensor*> reduce_buffers; // OutT
-  std::vector<DenseTensor*> barrier_buffers; //UINT8 (c10::ScalarType::Byte)
+  std::vector<DenseTensor> output_buffers; // OutT
+  std::vector<DenseTensor> reduce_buffers; // OutT
+  std::vector<DenseTensor> barrier_buffers; //UINT8 (c10::ScalarType::Byte)
 #ifndef FLUX_SHM_USE_NVSHMEM
   // used for the cuda-ipc-barrier
-  std::vector<DenseTensor*> sync_buffers; // int32_t (c10::ScalarType::Int)
+  std::vector<DenseTensor> sync_buffers; // int32_t (c10::ScalarType::Int)
 #endif
-  DenseTensor* output_buffer;
-  DenseTensor* reduce_buffer;
-  DenseTensor* barrier_buffer{nullptr};
+  DenseTensor output_buffer;
+  DenseTensor reduce_buffer;
+  DenseTensor barrier_buffer;
   DenseTensor gemm_buffer; // TODO(umiswing): find a way to unify declaration, phi has some requirements.
   std::vector<void *> output_scatter_ptrs;
   std::vector<void *> barrier_ptrs;
@@ -116,38 +116,41 @@ class GemmRS {
   void
   init_output_buffer() {
     // update max_m and allocate buffer
-
     if (get_arch() == _Sm90{} || no_nvlink || (get_arch() == _Sm80{} && nnodes > 1)) {
-      // this->reduce_buffer = const_cast<DenseTensor*>(this->reduce_buffers[this->local_rank]);
+      int reduce_m_dim = (get_arch() == _Sm90{})
+                             ? (max_m + world_size - 1) / world_size * nnodes * nnodes
+                             : max_m;
+      this->reduce_buffers =
+          cudaipc_create_tensor_list({reduce_m_dim, n_dim}, output_dtype, this->tp_group, this->dev_ctx, "reduce_buffers");
       this->reduce_buffer = this->reduce_buffers[this->local_rank];
-    } else {
-      this->reduce_buffer = nullptr;
     }
-
-    // this->output_buffer = const_cast<DenseTensor*>(this->output_buffers[this->local_rank]);
+    if (get_arch() == _Sm80{} && nnodes > 1 && this->input_dtype == phi::DataType::BFLOAT16) {
+      // SM80 does not support the fuse reduction for the bfloat16 data type
+      // we have to use the float32 global_red instruction when SM80 && nnodes>1 && input_type=bf16
+      // Therefore, in this case, here double the size of the output_buffer.
+      this->output_buffers =
+          cudaipc_create_tensor_list({max_m * 2, n_dim}, output_dtype, this->tp_group, this->dev_ctx, "output_buffers", true);
+    } else {
+      this->output_buffers = cudaipc_create_tensor_list({max_m, n_dim}, output_dtype, this->tp_group, this->dev_ctx, "output_buffers", true);
+    }
     this->output_buffer = this->output_buffers[this->local_rank];
-
     for (int i = 0; i < world_size; ++i) {
       if (i / this->local_world_size == rank / this->local_world_size) {
-        // output_scatter_ptrs[i] = const_cast<void*>(this->output_buffers[i % this->local_world_size]->data());
-        output_scatter_ptrs[i] = this->output_buffers[i % this->local_world_size]->data();
+        output_scatter_ptrs[i] = this->output_buffers[i % this->local_world_size].data();
         // only check for ranks on the same node
-        PADDLE_ENFORCE(
-            output_scatter_ptrs[i] != nullptr, "nullptr buffr of rank %d", i);
+        PADDLE_ENFORCE_NOT_NULL(
+            output_scatter_ptrs[i],
+            common::errors::InvalidArgument("nullptr buffr of rank " + std::to_string(i)));
       } else {
         output_scatter_ptrs[i] = nullptr;
       }
     }
 #ifndef FLUX_SHM_USE_NVSHMEM
-#if 0
     this->sync_buffers =
-        flux_create_tensor_list({this->world_size}, paddle::DataType::INT32, this->tp_group);
-#endif
-#if 0
-    // TODO(umiswing): maybe it's better to zero sync_buffers at python side
-    // TODO(umiswing): what is type of sync_buffers? is it really OutT?
+        cudaipc_create_tensor_list({this->world_size}, paddle::DataType::INT32, this->tp_group, this->dev_ctx, "sync_buffers", true);
     phi::funcs::SetConstant<GPUContext, int32_t> set_functor;
-    set_functor(this->dev_ctx, this->sync_buffers[this->rank], 0);
+    set_functor(this->dev_ctx, &this->sync_buffers[this->rank], 0);
+#if 0
     // this->sync_buffers[this->rank].zero_();  // zeros the sync buffer for cuda ipc at the start
 #endif
 #endif
@@ -156,19 +159,16 @@ class GemmRS {
   void
   lazy_init_barrier_buffer(int64_t buffer_size) {
     if ((buffer_size == 0) ||
-        (barrier_buffer != nullptr && barrier_buffer->initialized() && buffer_size <= barrier_buffer->numel())) {
+        (barrier_buffer.initialized() && buffer_size <= barrier_buffer.numel())) {
       return;
     }
-#if 0
     this->barrier_buffers =
-        flux_create_tensor_list({buffer_size}, paddle::DataType::UINT8, this->tp_group);
-#endif
+        cudaipc_create_tensor_list({buffer_size}, paddle::DataType::UINT8, this->tp_group, this->dev_ctx, "barrier_buffers", true);
     this->barrier_buffer = this->barrier_buffers[this->local_rank];
     for (int i = 0; i < world_size; ++i) {
       if (i / this->local_world_size == rank / this->local_world_size) {
-        barrier_ptrs[i] = this->barrier_buffers[i % this->local_world_size]->data();
+        barrier_ptrs[i] = this->barrier_buffers[i % this->local_world_size].data();
         // only check for ranks on the same node
-        // PADDLE_ENFORCE(barrier_ptrs[i] != nullptr, "nullptr buffr of rank " + std::to_string(i));
         PADDLE_ENFORCE_NOT_NULL(
             barrier_ptrs[i],
             common::errors::InvalidArgument("nullptr buffr of rank " + std::to_string(i)));
@@ -214,12 +214,6 @@ class GemmRS {
     }
     buffer_size = (buffer_size + 127) / 128 * 128;
     if (!this->gemm_buffer.initialized() || buffer_size > this->gemm_buffer.numel()) {
-      // auto options = input.options().dtype(c10::ScalarType::Byte);
-      // auto options = input.options().dtype(paddle::DataType::UINT8);
-      // this->gemm_buffer = paddle::empty({buffer_size}, options);
-
-      // TODO(umiswing): how to pass dev_ctx? what about options?
-      // umiswing: paddle will pass dev_ctx when register kernel.
       this->gemm_buffer = phi::Empty<uint8_t>(this->dev_ctx,{buffer_size});
     }
   }
@@ -228,7 +222,12 @@ class GemmRS {
   // umiswing: paddle can only return comm stream of type cudaStram_t.
   cudaStream_t
   CreateReduceScatterStream() {
-    return this->comm_ctx->stream();
+     cudaStream_t rs_stream = nullptr;
+     int least_priority, greatest_priority;
+     PADDLE_ENFORCE_GPU_SUCCESS(cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority));
+     PADDLE_ENFORCE_GPU_SUCCESS(cudaStreamCreateWithPriority(&rs_stream, cudaStreamNonBlocking, greatest_priority));
+     return rs_stream;
+    // return this->comm_ctx->stream();
 #if 0
     // umiswing: i don't think it's a good idea to manually create and set cuda stream, and i don't understand why does
     // flux manage it in such way.
@@ -257,40 +256,23 @@ class GemmRS {
  public:
   GemmRS(
       const phi::GPUContext& dev_ctx,
-      // const phi::distributed::ProcessGroup* pg,
+      phi::distributed::ProcessGroup* tp_group_,
       const phi::GPUContext* comm_ctx,
-      // const phi::DeviceContext* comm_ctx,
-      // phi::intrusive_ptr<paddle::distributed::ProcessGroupNCCL> tp_group_,
       int32_t nnodes,
       int32_t max_m,
       int32_t n_dim,
       bool transpose_weight,
-      bool fuse_reduction,
-      int32_t rank,
-      int32_t world_size,
-      std::vector<DenseTensor*>& output_buffers,
-      std::vector<DenseTensor*>& reduce_buffers,
-      std::vector<DenseTensor*>& sync_buffers,
-      std::vector<DenseTensor*>& barrier_buffers)
+      bool fuse_reduction)
       : dev_ctx(dev_ctx),
         comm_ctx(comm_ctx),
-        // pg(pg),
-        // tp_group(tp_group_),
+        tp_group(tp_group_),
         nnodes(nnodes),
         max_m(max_m),
         n_dim(n_dim),
-#if 0
-        input_dtype(input_dtype),
-        output_dtype(output_dtype),
-#endif
         transpose_weight(transpose_weight),
         fuse_reduction(fuse_reduction),
-        rank(rank),
-        world_size(world_size),
-        output_buffers(output_buffers),
-        reduce_buffers(reduce_buffers),
-        sync_buffers(sync_buffers),
-        barrier_buffers(barrier_buffers),
+        rank(tp_group->GetRank()),
+        world_size(tp_group->GetSize()),
         local_world_size(world_size / nnodes),
         local_rank(rank % local_world_size),
         node_idx(rank / local_world_size),
@@ -300,22 +282,6 @@ class GemmRS {
         rs_stream_(CreateReduceScatterStream()),  // private stream. never dup with gemm stream
         use_1d_ring(use_1d_ring_or_not()),
         use_p2p_read(use_p2p_read_or_not()) {
-#if 0
-        is_fp8_gemm(is_fp8_paddle_dtype(input_dtype))
-    if (std::is_same<InT, phi::dtype::float16>::value) {
-        this->input_dtype = phi::DataType::FLOAT16;
-    } else if (std::is_same<InT, phi::dtype::bfloat16>::value) {
-        this->input_dtype = phi::DataType::BFLOAT16;
-    }
-
-    if (std::is_same<OutT, phi::dtype::float16>::value) {
-        this->output_dtype = phi::DataType::FLOAT16;
-    } else if (std::is_same<OutT, phi::dtype::bfloat16>::value) {
-        this->output_dtype = phi::DataType::BFLOAT16;
-    }
-
-    this->is_fp8_gemm = is_fp8_paddle_dtype(this->input_dtype);
-#endif
 
     PADDLE_ENFORCE(
         rank >= 0 && rank < world_size,
@@ -378,14 +344,8 @@ class GemmRS {
   get_gemm_meta(bool has_bias, bool fast_accum = false) {
     ArchEnum arch = get_arch();
     auto gemm_layout = transpose_weight ? _RRR{}() : _RCR{}();
-#if 0
     auto input_dtype = from_paddle_dtype(this->input_dtype);
     auto output_dtype = from_paddle_dtype(this->output_dtype);
-#endif
-
-    auto input_dtype = from_paddle_dtype(this->input_dtype);
-    auto output_dtype = from_paddle_dtype(this->output_dtype);
-
     auto dt_conf = make_gemm_dtype_config(
         input_dtype, input_dtype, has_bias ? output_dtype : _Void{}(), output_dtype);
 
@@ -467,6 +427,7 @@ class GemmRS {
     static bool use_cudaMemcpyAsync = get_bool_from_env("FLUX_RS_USE_CUDA_MEMCPY_ASYNC", false);
     static int n_split = get_int_from_env("FLUX_RS_N_SPLIT", 1);
     static bool per_tile_flags = get_bool_from_env("FLUX_RS_PER_TILE_FLAGS", no_nvlink);
+
     ReduceScatterArguments reduce_scatter_args{
         .reduce_scatter_num_blocks = num_blocks,
         .rs_stream = rs_stream_,
@@ -507,7 +468,7 @@ class GemmRS {
           .bias = bias.is_initialized() ? bias->data() : nullptr,
           .output_scatter_ptrs = this->output_scatter_ptrs.data(),
           .local_reduce_buffer =
-              this->reduce_buffer != nullptr && this->reduce_buffer->initialized() ? this->reduce_buffer->data() : nullptr,
+              this->reduce_buffer.initialized() ? this->reduce_buffer.data() : nullptr,
           .barrier_ptrs = this->barrier_ptrs.data(),
           .avail_sms = no_nvlink ? 1 : -1,
           .reduce_scatter_args = reduce_scatter_args
@@ -522,14 +483,45 @@ class GemmRS {
       int64_t barrier_workspace_size = cutlass_op->get_barrier_workspace_size(args);
       // * 8 is for corner case reduce_scatter tiles. never mind this won't be a large memory
       barrier_workspace_size = barrier_workspace_size / sizeof(int) * sizeof(PerTileFlags) * 8;
-      // TODO(umiswing): find a way to init barrier buffer in cpp, now just recored buffer size
-      // and allocate in python manually
       this->lazy_init_barrier_buffer(barrier_workspace_size);
 
       if ((fuse_reduction && !(meta.arch() == _Sm90{})) || this->no_nvlink) {
         // need to zero buffers;
         zero_buffers();
       }
+
+    std::string filename = "args_debug.log" + std::to_string(this->tp_group->GetRank());
+
+    static int clear_log UNUSED = [=]() {
+      std::ofstream file(filename);
+      file.close();
+      return 0;
+    }();
+
+    std::ofstream file(filename, std::ios::app);
+
+    file << "num_blocks:" << std::to_string(num_blocks)
+         << "\nuse_barrier_queue:" << std::to_string(use_barrier_queue)
+         << "\nuse_gemmk:" << std::to_string(use_gemmk)
+         << "\nper_tile_flags:" << std::to_string(per_tile_flags)
+         << "\nuse_cudaMemcpyAsync:" << std::to_string(use_cudaMemcpyAsync)
+         << "\nn_split:" << std::to_string(n_split)
+         << "\nthis->sub_world_size:" << std::to_string(this->sub_world_size)
+         << "\nuse_1d_ring:" << std::to_string(use_1d_ring)
+         << "\nuse_p2p_read:" << std::to_string(use_p2p_read)
+         << "\nrt_conf.m():" << std::to_string(rt_conf.m())
+         << "\nrt_conf.n():" << std::to_string(rt_conf.n())
+         << "\nrt_conf.k():" << std::to_string(rt_conf.k())
+         << "\nthis->rank:" << this->rank
+         << "\nthis->world_size:" << this->world_size
+         << "\nthis->nnodes:" << this->nnodes
+         << "\nbias.is_initialized():" << std::to_string(bias.is_initialized())
+         << "\nthis->reduce_buffer.initialized():" << std::to_string(this->reduce_buffer.initialized())
+         << "\nworkspace_size:" << std::to_string(workspace_size)
+         << "\nbarrier_workspace_size:" << std::to_string(barrier_workspace_size)
+         << std::endl;
+    file.close();
+
       cutlass_op->run(args, workspace, stream);
 
     } else {
@@ -547,7 +539,7 @@ class GemmRS {
           .bias = bias.is_initialized() ? bias->data() : nullptr,
           .output_scatter_ptrs = this->output_scatter_ptrs.data(),
           .local_reduce_buffer =
-              this->reduce_buffer->initialized() ? this->reduce_buffer->data() : nullptr,
+              this->reduce_buffer.initialized() ? this->reduce_buffer.data() : nullptr,
           .barrier_ptrs = this->barrier_ptrs.data(),
           .avail_sms = no_nvlink ? 1 : -1,
           .reduce_scatter_args = reduce_scatter_args,
@@ -600,9 +592,16 @@ class GemmRS {
     int m = rt_conf.m();
     int n = rt_conf.n();
 
+#if 0
+    DenseTensor output;
+    output.Resize(common::make_ddim({nnodes, m / world_size, n}));
+    this->dev_ctx.template Alloc<OutT>(&output);
+    return output;
+#endif
+
     if (((int)get_arch() < (int)_Sm90{}())) {
       // auto full_output = this->output_buffer.slice(0, 0, m);
-      DenseTensor full_output = phi::funcs::Slice<OutT>(this->dev_ctx, *this->output_buffer, {0}, {0}, {m});
+      DenseTensor full_output = phi::funcs::Slice<OutT>(this->dev_ctx, this->output_buffer, {0}, {0}, {m});
       if (nnodes > 1 && !no_nvlink) {
 #if 0
         // TODO (umiswing): support multinodes reduce
@@ -649,7 +648,7 @@ class GemmRS {
             output_buffer.slice(0, m_per_rank * this->rank, m_per_rank * (this->rank + 1));
 #endif
         DenseTensor output_2d = phi::funcs::Slice<OutT>(this->dev_ctx,
-                                                        *this->output_buffer,
+                                                        this->output_buffer,
                                                         {0},
                                                         {m_per_rank * this->rank},
                                                         {m_per_rank * (this->rank + 1)});
@@ -672,7 +671,7 @@ class GemmRS {
               0, m_per_rank * reduce_unused_segment, m_per_rank * (reduce_unused_segment + 1));
 #endif
           DenseTensor segment_other_node = phi::funcs::Slice<OutT>(this->dev_ctx,
-                                                                   *reduce_buffer,
+                                                                   reduce_buffer,
                                                                    {0},
                                                                    {m_per_rank * reduce_unused_segment},
                                                                    {m_per_rank * (reduce_unused_segment + 1)});
@@ -691,7 +690,7 @@ class GemmRS {
           // return this->output_buffer.slice(0, rank * length, (rank + 1) * length).unsqueeze(0);
           phi::DenseTensor output_buffer_sliced =
               phi::funcs::Slice<OutT>(this->dev_ctx,
-                                              *this->output_buffer,
+                                              this->output_buffer,
                                               {0},
                                               {0},
                                               {length});
@@ -716,6 +715,7 @@ class GemmRS {
                                       full_output,
                                       {nnodes, local_world_size, m / world_size, n},
                                       &output_4d);
+          return output_4d;
           DenseTensor output;
           output.Resize(common::make_ddim({nnodes, m / world_size, n}));
           this->dev_ctx.template Alloc<OutT>(&output);
@@ -732,7 +732,7 @@ class GemmRS {
 #endif
 
       DenseTensor full_output = phi::funcs::Slice<OutT>(this->dev_ctx,
-                                                        *this->reduce_buffer,
+                                                        this->reduce_buffer,
                                                         {0},
                                                         {0},
                                                         {reduce_m_dim});
@@ -796,8 +796,11 @@ class GemmRS {
       paddle::optional<const UnifiedGemmHParams> hparams) {
     forward_gemm_impl(
         input, weight, bias, input_scale, weight_scale, output_scale, fast_accum, hparams);
+nvtxRangePush("fwd_barrier");
     forward_barrier(input, weight, bias);
-    return forward_reduce_scatter_impl(input, weight, bias, hparams);
+nvtxRangePop();
+    return input;
+    // return forward_reduce_scatter_impl(input, weight, bias, hparams);
   }
 
   void
@@ -870,34 +873,18 @@ class GemmRS {
 
   void
   zero_buffers() {
-    // TODO(umiswing): not sure which api to use in paddle.
-    // cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
     cudaStream_t stream = this->dev_ctx.stream();
-#if 0
-    if (this->output_buffer.defined()) {
-      this->output_buffer.zero_();
-    }
-    if (this->barrier_buffer.defined()) {
-      this->barrier_buffer.zero_();
-    }
-    if (this->reduce_buffer.defined()) {
-      this->reduce_buffer.zero_();
-    }
-#endif
-    if (this->output_buffer->initialized()) {
-        // FillKernel(this->dev_ctx, this->output_buffer, 0, &this->output_buffer);
+    if (this->output_buffer.initialized()) {
         phi::funcs::SetConstant<GPUContext, OutT> set_functor;
-        set_functor(this->dev_ctx, this->output_buffer, OutT{0});
+        set_functor(this->dev_ctx, &this->output_buffer, OutT{0});
     }
-    if (this->barrier_buffer->initialized()) {
-        // FillKernel(this->dev_ctx, this->barrier_buffer, 0, &this->barrier_buffer);
+    if (this->barrier_buffer.initialized()) {
         phi::funcs::SetConstant<GPUContext, uint8_t> set_functor;
-        set_functor(this->dev_ctx, this->barrier_buffer, uint8_t{0});
+        set_functor(this->dev_ctx, &this->barrier_buffer, uint8_t{0});
     }
-    if (this->reduce_buffer->initialized()) {
-        // FillKernel(this->dev_ctx, this->reduce_buffer, 0, &this->reduce_buffer);
+    if (this->reduce_buffer.initialized()) {
         phi::funcs::SetConstant<GPUContext, OutT> set_functor;
-        set_functor(this->dev_ctx, this->reduce_buffer, OutT{0});
+        set_functor(this->dev_ctx, &this->reduce_buffer, OutT{0});
     }
 #ifdef FLUX_SHM_USE_NVSHMEM
     flux_barrier_all_on_stream(stream);

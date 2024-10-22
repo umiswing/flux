@@ -24,6 +24,9 @@
 #include <nvshmemx.h>
 #endif
 
+#include "paddle/phi/backends/gpu/gpu_info.h"
+#include "paddle/phi/kernels/empty_kernel.h"
+
 namespace bytedance {
 namespace flux {
 
@@ -92,65 +95,126 @@ nvshmem_create_tensor_list(const std::vector<int64_t> &shape, c10::ScalarType dt
 
 #endif
 
-#if 0
-std::vector<torch::Tensor>
-cudaipc_create_tensor_list(
-    c10::intrusive_ptr<c10d::ProcessGroup> pg,
-    const std::vector<int64_t> &shape,
-    c10::ScalarType dtype) {
-  auto option_gpu =
-      at::TensorOptions().dtype(dtype).device(at::kCUDA).device_index(c10::cuda::current_device());
+// using Deleter = std::function<void(void*)>;
+// using Deleter = std::function<void(phi::Allocation*)>;
+using Deleter = void (*)(phi::Allocation*);
+using AllocationDeleter = void (*)(phi::Allocation*);
+DenseTensor from_blob(void *data,
+                      const std::vector<int64_t>& shape,
+                      phi::DataType dtype,
+                      phi::Place place,
+                      const Deleter& deleter,
+                      phi::DataLayout layout = phi::DataLayout::NCHW ) {
+  PADDLE_ENFORCE_NOT_NULL(
+      data, common::errors::InvalidArgument("data can not be nullptr."));
 
-  FLUX_CHECK(pg->getSize() <= torch::cuda::device_count())
+  // TODO(umiswing): this check looks nice
+  // auto data_place = GetPlaceFromPtr(data);
+  phi::is_gpu_place(place);
+
+  auto meta =
+      phi::DenseTensorMeta(dtype, common::make_ddim(shape), layout);
+
+  size_t size = SizeOf(dtype) * (meta.is_scalar ? 1 : product(meta.dims));
+
+#if 0
+  AllocationDeleter alloc_deleter = nullptr;
+  if (deleter) {
+    static thread_local Deleter g_deleter = deleter;
+    alloc_deleter = [](phi::Allocation* p) { g_deleter(p); };
+  }
+#endif
+
+  auto alloc =
+      // std::make_shared<phi::Allocation>(data, size, alloc_deleter, place/*data_place*/);
+      std::make_shared<phi::Allocation>(data, size, deleter, place/*data_place*/);
+
+  return DenseTensor(alloc, meta);
+}
+
+std::vector<DenseTensor>
+cudaipc_create_tensor_list(
+    const std::vector<int64_t> &shape,
+    const phi::DataType dtype,
+    distributed::ProcessGroup* pg,
+    const phi::GPUContext& dev_ctx,
+    const std::string buffer_name,
+    const bool real) {
+
+  FLUX_CHECK(pg->GetSize() <= phi::backends::gpu::GetGPUDeviceCount())
       << "create_ipc_tensors should only be used intra node";
-  auto size = torch::elementSize(dtype) *
-              std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
+
+  size_t size = SizeOf(dtype) * std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
   FLUX_CHECK(size != 0);
   void *ptr = nullptr;
-  CUDA_CHECK(cudaMalloc(&ptr, size));
-  CUDA_CHECK(cudaMemset(ptr, 0, size)); // memset the allocated buffer
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaMalloc(&ptr, size));
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaMemset(ptr, 0, size)); // memset the allocated buffer
   cudaIpcMemHandle_t handle;
-  CUDA_CHECK(cudaIpcGetMemHandle(&handle, ptr));
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaIpcGetMemHandle(&handle, ptr));
 
-  auto option_local = at::TensorOptions()
-                          .dtype(torch::kUInt8)
-                          .device(at::kCUDA)
-                          .device_index(c10::cuda::current_device());
-  auto handle_d = torch::empty({sizeof(cudaIpcMemHandle_t)}, option_local);
-  CUDA_CHECK(cudaMemcpy(
-      handle_d.data_ptr(), &handle, sizeof(cudaIpcMemHandle_t), cudaMemcpyHostToDevice));
-  auto handles_d = torch::empty({sizeof(cudaIpcMemHandle_t) * pg->getSize()}, option_local);
-  pg->_allgather_base(handles_d, handle_d)->wait();
+  DenseTensor handle_d = phi::Empty<uint8_t>(dev_ctx, {sizeof(cudaIpcMemHandle_t)});
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaMemcpy(
+      handle_d.data(), &handle, sizeof(cudaIpcMemHandle_t), cudaMemcpyHostToDevice));
+  long int handles_shape = sizeof(cudaIpcMemHandle_t) * pg->GetSize();
+  DenseTensor handles_d = phi::Empty<uint8_t>(dev_ctx, {handles_shape});
+  // TODO(umiswing): find a better way to wrap func params
+  pg->AllGather(&handles_d, handle_d, 0, -1, true, true)->Wait();
 
-  std::vector<cudaIpcMemHandle_t> handles_h(pg->getSize());
-  CUDA_CHECK(cudaMemcpy(
+  std::vector<cudaIpcMemHandle_t> handles_h(pg->GetSize());
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaMemcpy(
       handles_h.data(),
-      handles_d.data_ptr(),
-      sizeof(cudaIpcMemHandle_t) * pg->getSize(),
+      handles_d.data(),
+      sizeof(cudaIpcMemHandle_t) * pg->GetSize(),
       cudaMemcpyDeviceToHost));
 
-  std::vector<void *> ptrs(pg->getSize());
-  for (int i = 0; i < pg->getSize(); ++i) {
-    if (i != pg->getRank()) {
-      CUDA_CHECK(cudaIpcOpenMemHandle(&ptrs[i], handles_h[i], cudaIpcMemLazyEnablePeerAccess));
+  std::vector<void *> ptrs(pg->GetSize());
+  for (int i = 0; i < pg->GetSize(); ++i) {
+    if (i != pg->GetRank()) {
+      if (real) {
+        PADDLE_ENFORCE_GPU_SUCCESS(cudaIpcOpenMemHandle(&ptrs[i], handles_h[i], cudaIpcMemLazyEnablePeerAccess));
+      } else {
+        void *ptr = nullptr;
+        PADDLE_ENFORCE_GPU_SUCCESS(cudaMalloc(&ptr, size));
+        PADDLE_ENFORCE_GPU_SUCCESS(cudaMemset(ptr, 0, size)); // memset the allocated buffer
+        ptrs[i] = ptr;
+      }
     } else {
       ptrs[i] = ptr;
     }
   }
 
-  std::vector<torch::Tensor> tensors;
-  for (int i = 0; i < pg->getSize(); ++i) {
-    torch::Tensor tensor;
-    if (i == pg->getRank()) {
-      tensor = at::from_blob(ptr, shape, [](void *ptr) { cudaFree(ptr); }, option_gpu);
+  std::vector<DenseTensor> tensors;
+  for (int i = 0; i < pg->GetSize(); ++i) {
+    DenseTensor tensor;
+    if (i == pg->GetRank() || !real) {
+      tensor = from_blob(ptr, shape, dtype, dev_ctx.GetPlace(), [](phi::Allocation* allocation) { cudaFree(allocation->ptr()); });
     } else {
       tensor =
-          at::from_blob(ptrs[i], shape, [](void *ptr) { cudaIpcCloseMemHandle(ptr); }, option_gpu);
+          from_blob(ptrs[i], shape, dtype, dev_ctx.GetPlace(), [](phi::Allocation* allocation) { cudaIpcCloseMemHandle(allocation->ptr()); });
     }
     tensors.emplace_back(tensor);
   }
+
+  std::string filename = "debug.log" + std::to_string(pg->GetRank());
+
+  static int clear_log UNUSED = [=]() {
+    std::ofstream file(filename);
+    file.close();
+    return 0;
+  }();
+
+  std::ofstream file(filename, std::ios::app);
+  file << "\n" << buffer_name;
+  for (int i = 0; i < pg->GetSize(); ++i) {
+    file << "i == pg->GetRank():" << (i == pg->GetRank()) << " ,i:" << i << " ,pg->GetRank():" << pg->GetRank();
+  }
+  file << std::endl;
+  file.close();
+
   return tensors;
 }
+
+#if 0
 
 void
 init_flux_shm(c10::intrusive_ptr<c10d::ProcessGroup> c10_pg) {
@@ -193,7 +257,7 @@ flux_create_tensor_list(
 void
 flux_barrier_all_on_stream(
     cudaStream_t stream,
-    paddle::optional<std::vector<DenseTensor*>> sync_buffers,
+    paddle::optional<std::vector<DenseTensor>> sync_buffers,
     paddle::optional<int> rank) {
 #ifdef FLUX_SHM_USE_NVSHMEM
   nvshmemx_barrier_all_on_stream(stream);
@@ -207,12 +271,12 @@ flux_barrier_all_on_stream(
   auto sync_buffers_val = sync_buffers.value();
   FLUX_CHECK(sync_buffers_val[rank.value()].defined());
 #endif
-  std::vector<DenseTensor*> sync_buffers_val = sync_buffers.get();
-  FLUX_CHECK(sync_buffers_val[rank.get()]->initialized());
+  std::vector<DenseTensor>& sync_buffers_val = sync_buffers.get();
+  FLUX_CHECK(sync_buffers_val[rank.get()].initialized());
 
   int world_size = sync_buffers_val.size();
   for (size_t i = 0; i < sync_buffers_val.size(); i++) {
-    sync_buffer_ptrs.push_back(reinterpret_cast<int32_t *>(sync_buffers_val[i]->data()));
+    sync_buffer_ptrs.push_back(reinterpret_cast<int32_t *>(sync_buffers_val[i].data()));
   }
   cudaipc_barrier_all_on_stream_impl(stream, sync_buffer_ptrs.data(), rank.get(), world_size);
 #endif

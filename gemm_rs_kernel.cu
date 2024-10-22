@@ -74,21 +74,18 @@ void GemmRSKernel(const Context& dev_ctx,
   std::vector<DenseTensor*> nonconst_sync_buffers = get_non_const_buffers(sync_buffers);
   std::vector<DenseTensor*> nonconst_barrier_buffers = get_non_const_buffers(barrier_buffers);
 
-  bytedance::flux::ths_op::flux::GemmRS<T, T> gemm_rs(dev_ctx,
+  static bytedance::flux::ths_op::flux::GemmRS<T, T> gemm_rs(dev_ctx,
+                                                      pg,
                                                       comm_ctx,
                                                       nnodes,
                                                       max_m,
                                                       n_dim,
                                                       transpose_weight,
-                                                      fuse_reduction,
-                                                      rank,
-                                                      world_size,
-                                                      nonconst_output_buffers,
-                                                      nonconst_reduce_buffers,
-                                                      nonconst_sync_buffers,
-                                                      nonconst_barrier_buffers);
+                                                      fuse_reduction);
 
-  *fake_output = gemm_rs.forward(input, weight, bias, input_scale, weight_scale, output_scale, true);
+  // *fake_output = gemm_rs.forward(input, weight, bias, input_scale, weight_scale, output_scale, true);
+  gemm_rs.forward(input, weight, bias, input_scale, weight_scale, output_scale, true);
+  *fake_output = phi::Empty<T>(dev_ctx,{2});
 }
 
 } // namespace phi

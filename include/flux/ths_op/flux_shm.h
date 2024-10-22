@@ -19,6 +19,9 @@
 #include <cuda_runtime_api.h>
 #include <vector>
 #include "paddle/phi/core/dense_tensor.h"
+#include "paddle/phi/core/distributed/collective/process_group.h"
+#include "paddle/phi/backends/gpu/gpu_context.h"
+
 using namespace phi;
 namespace bytedance::flux {
 #if 0
@@ -34,20 +37,23 @@ std::vector<torch::Tensor> flux_create_tensor_list(
 #endif
 void flux_barrier_all_on_stream(
     cudaStream_t stream,
-    paddle::optional<std::vector<DenseTensor*>> barrier_tensors = paddle::none,
+    paddle::optional<std::vector<DenseTensor>> barrier_tensors = paddle::none,
     paddle::optional<int> rank = paddle::none);
 #if 0
 void pyflux_barrier_all_on_stream(
     intptr_t stream,
     c10::optional<std::vector<torch::Tensor>> barrier_tensors = c10::nullopt,
     c10::optional<int> rank = c10::nullopt);
+#endif
 
 // suggest use the functions above if possible
-std::vector<torch::Tensor> cudaipc_create_tensor_list(
-    c10::intrusive_ptr<c10d::ProcessGroup> pg,
+std::vector<DenseTensor> cudaipc_create_tensor_list(
     const std::vector<int64_t> &shape,
-    c10::ScalarType dtype);
-#endif
+    const phi::DataType dtype,
+    distributed::ProcessGroup* pg,
+    const phi::GPUContext& dev_ctx,
+    const std::string buffer_name,
+    const bool real = false);
 
 #ifdef FLUX_SHM_USE_NVSHMEM
 std::vector<torch::Tensor> nvshmem_create_tensor_list(
