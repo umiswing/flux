@@ -796,11 +796,11 @@ class GemmRS {
       paddle::optional<const UnifiedGemmHParams> hparams) {
     forward_gemm_impl(
         input, weight, bias, input_scale, weight_scale, output_scale, fast_accum, hparams);
-nvtxRangePush("fwd_barrier");
+// nvtxRangePush("fwd_barrier");
     forward_barrier(input, weight, bias);
-nvtxRangePop();
-    return input;
-    // return forward_reduce_scatter_impl(input, weight, bias, hparams);
+// nvtxRangePop();
+    // return input;
+    return forward_reduce_scatter_impl(input, weight, bias, hparams);
   }
 
   void
